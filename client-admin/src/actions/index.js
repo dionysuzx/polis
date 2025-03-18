@@ -219,7 +219,7 @@ export const doSignin = (attrs) => {
           // Force page to load so we can be sure the password is cleared from memory
           // delay a bit so the cookie has time to set
           dispatch({ type: 'signin completed successfully' })
-          window.location = '/'
+          window.location = '/conversations'
         }, 3000)
       },
       (err) => dispatch(signinError(err))

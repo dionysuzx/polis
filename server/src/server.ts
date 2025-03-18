@@ -7568,6 +7568,7 @@ Email verified! You can close this tab or hit the back button.
     // let course_invite = req.p.course_invite;
     let include_all_conversations_i_am_in =
       req.p.include_all_conversations_i_am_in;
+    let include_all_public_conversations = req.p.include_all_public_conversations;
     let want_mod_url = req.p.want_mod_url;
     let want_upvoted = req.p.want_upvoted;
     let want_inbox_item_admin_url = req.p.want_inbox_item_admin_url;
@@ -7577,6 +7578,40 @@ Email verified! You can close this tab or hit the back button.
       req.p.want_inbox_item_participant_html;
     let context = req.p.context;
 
+    // For public conversations (no authentication required)
+    if (include_all_public_conversations) {
+      // Use a direct SQL query for better reliability
+      // Include drafts and non-active since we're showing to the public homepage
+      // Also include the zinvite code for proper URL construction
+      const publicConversationsQuery = `
+        SELECT 
+          c.*, 
+          z.zinvite
+        FROM 
+          conversations c
+        LEFT JOIN
+          zinvites z ON c.zid = z.zid
+        WHERE 
+          c.is_public = TRUE 
+        ORDER BY 
+          c.created DESC;
+      `;
+      
+      pgQuery_readOnly(
+        publicConversationsQuery,
+        [],
+        function (err: any, results: any) {
+          if (err) {
+            fail(res, 500, "polis_err_get_public_conversations", err);
+            return;
+          }
+          res.status(200).json(results.rows);
+        }
+      );
+      return;
+    }
+
+    // Normal path for authenticated users
     // this statement is currently a subset of the next one
     // let zidListQuery = "select zid from page_ids where site_id = (select site_id from users where uid = ($1))";
 
@@ -7625,7 +7660,7 @@ Email verified! You can close this tab or hit the back button.
           }
         } else {
           orClauses = sql_conversations.owner.equals(uid);
-          if (participantInOrSiteAdminOf.length) {
+          if (participantInOrSiteAdminOf && participantInOrSiteAdminOf.length) {
             orClauses = orClauses.or(
               sql_conversations.zid.in(participantInOrSiteAdminOf)
             );
@@ -7850,14 +7885,41 @@ Email verified! You can close this tab or hit the back button.
     let zid = req.p.zid;
     let uid = req.p.uid;
 
+    // If there's no user ID, allow report creation for public conversations
+    if (!uid) {
+      return (
+        // Check if the conversation is public
+        pgQueryP("SELECT * FROM conversations WHERE zid = ($1) AND is_public = TRUE", [zid])
+          .then((rows: any) => {
+            if (!rows || !rows.length) {
+              return fail(res, 403, "polis_err_post_reports_nonpublic_conversation");
+            }
+            
+            return createReport(zid).then(() => {
+              res.json({});
+            });
+          })
+          .catch((err: any) => {
+            fail(res, 500, "polis_err_post_reports_misc", err);
+          })
+      );
+    }
+
+    // Flow for authenticated users
     return (
-      isModerator(zid, uid)
-        // Argument of type '(isMod: any, err: string) => void | globalThis.Promise<void>' is not assignable to parameter of type '(value: unknown) => void | PromiseLike<void>'.ts(2345)
-        // @ts-ignore
-        .then((isMod: any, err: string) => {
-          if (!isMod) {
-            return fail(res, 403, "polis_err_post_reports_permissions", err);
+      // Check if this user is a moderator OR if the conversation is public
+      Promise.all([
+        isModerator(zid, uid),
+        pgQueryP("SELECT * FROM conversations WHERE zid = ($1) AND is_public = TRUE", [zid])
+      ])
+        .then(([isMod, publicRows]) => {
+          const isPublic = publicRows && publicRows.length > 0;
+          
+          // Allow if user is a moderator OR the conversation is public
+          if (!isMod && !isPublic) {
+            return fail(res, 403, "polis_err_post_reports_permissions");
           }
+          
           return createReport(zid).then(() => {
             res.json({});
           });
@@ -7943,14 +8005,28 @@ Email verified! You can close this tab or hit the back button.
         ]);
       }
     } else if (zid) {
-      reportsPromise = isModerator(zid, uid).then(
-        (doesOwnConversation: any) => {
-          if (!doesOwnConversation) {
+      // If no uid (not authenticated), or not a moderator, check if the conversation is public
+      if (!uid) {
+        reportsPromise = pgQueryP("SELECT * FROM conversations WHERE zid = ($1) AND is_public = TRUE", [zid])
+          .then((rows: any) => {
+            if (!rows || !rows.length) {
+              throw "polis_err_permissions"; // Not a public conversation
+            }
+            return pgQueryP("select * from reports where zid = ($1);", [zid]);
+          });
+      } else {
+        // Authenticated user - check if moderator or if the conversation is public
+        reportsPromise = Promise.all([
+          isModerator(zid, uid),
+          pgQueryP("SELECT * FROM conversations WHERE zid = ($1) AND is_public = TRUE", [zid])
+        ]).then(([isMod, publicRows]) => {
+          const isPublic = publicRows && publicRows.length > 0;
+          if (!isMod && !isPublic) {
             throw "polis_err_permissions";
           }
           return pgQueryP("select * from reports where zid = ($1);", [zid]);
-        }
-      );
+        });
+      }
     } else {
       reportsPromise = pgQueryP(
         "select * from reports where zid in (select zid from conversations where owner = ($1));",
@@ -8056,7 +8132,7 @@ Email verified! You can close this tab or hit the back button.
           .catch(function (err: any) {
             fail(res, 500, "polis_err_get_conversations_1", err);
           });
-      } else if (req.p.uid || req.p.context) {
+      } else if (req.p.uid || req.p.context || req.p.include_all_public_conversations) {
         getConversations(req, res);
       } else {
         fail(res, 403, "polis_err_need_auth");

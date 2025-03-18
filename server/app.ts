@@ -1141,6 +1141,7 @@ helpersInitialized.then(
       moveToBody,
       authOptional(assignToP),
       want("include_all_conversations_i_am_in", getBool, assignToP),
+      want("include_all_public_conversations", getBool, assignToP),
       want("is_active", getBool, assignToP),
       want("is_draft", getBool, assignToP),
       want("course_invite", getStringLimitLength(1, 32), assignToP),
@@ -1177,7 +1178,8 @@ helpersInitialized.then(
     app.get(
       "/api/v3/reportNarrative",
       moveToBody,
-      need("report_id", getReportIdFetchRid, assignToPCustom("rid")),
+      want("report_id", getReportIdFetchRid, assignToPCustom("rid")),
+      want("conversation_id", getStringLimitLength(1, 100), assignToP),
       handle_GET_reportNarrative
     );
 
@@ -1196,7 +1198,7 @@ helpersInitialized.then(
 
     app.post(
       "/api/v3/reports",
-      auth(assignToP),
+      authOptional(assignToP),
       want(
         "conversation_id",
         getConversationIdFetchZid,

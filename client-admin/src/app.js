@@ -132,7 +132,15 @@ class App extends React.Component {
       <>
         <Switch>
           <Redirect from="/:url*(/+)" to={location.pathname.slice(0, -1)} />
+          <Route exact path="/" component={Home} />
           <Route exact path="/home" component={Home} />
+          <Route exact path="/dashboard" render={() => {
+            if (this.isAuthed()) {
+              return <Redirect to="/conversations" />;
+            } else {
+              return <Redirect to="/signin" />;
+            }
+          }} />
           <Route
             exact
             path="/signin"
@@ -176,7 +184,7 @@ class App extends React.Component {
                   <Flex>
                     <Box sx={{ mr: [5], p: [4], flex: '0 0 auto' }}>
                       <Box sx={{ mb: [3] }}>
-                        <Link sx={{ variant: 'links.nav' }} to={`/`}>
+                        <Link sx={{ variant: 'links.nav' }} to={`/dashboard`}>
                           Conversations
                         </Link>
                       </Box>
@@ -202,7 +210,7 @@ class App extends React.Component {
                         isLoading={this.isLoading()}
                         authed={this.isAuthed()}
                         exact
-                        path="/"
+                        path="/conversations"
                         component={Conversations}
                       />
                       <PrivateRoute

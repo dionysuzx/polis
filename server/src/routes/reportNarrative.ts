@@ -703,107 +703,179 @@ export async function handle_GET_topics(
 }
 
 export async function handle_GET_reportNarrative(
-  req: { p: { rid: string }; query: QueryParams },
+  req: { p: { rid: string; conversation_id?: string }; query: QueryParams },
   res: Response
 ) {
-  const storage = new DynamoStorageService(
-    "report_narrative_store",
-    req.query.noCache === "true"
-  );
-  await storage.initTable();
-
-  const modelParam = req.query.model || "openai";
-  const modelVersionParam = req.query.modelVersion;
-
-  res.writeHead(200, {
-    "Content-Type": "text/plain; charset=utf-8",
-    "Transfer-Encoding": "chunked",
-  });
-  const { rid } = req.p;
-
-  res.write(`POLIS-PING: AI bootstrap`);
-
-  // @ts-expect-error flush - calling due to use of compression
-  res.flush();
-
-  const zid = await getZidForRid(rid);
-  if (!zid) {
-    fail(res, 404, "polis_error_report_narrative_notfound");
-    return;
-  }
-
-  res.write(`POLIS-PING: retrieving system lore`);
-
-  // @ts-expect-error flush - calling due to use of compression
-  res.flush();
-
-  const system_lore = await fs.readFile(
-    "src/report_experimental/system.xml",
-    "utf8"
-  );
-
-  res.write(`POLIS-PING: retrieving stream`);
-
-  // @ts-expect-error flush - calling due to use of compression
-  res.flush();
   try {
-    const cachedResponse = await storage?.getAllByReportID(rid);
-    if (
-      Array.isArray(cachedResponse) &&
-      cachedResponse?.length &&
-      !isFreshData(cachedResponse[0].timestamp)
-    ) {
-      res.write(`POLIS-PING: pruining cache`);
-      await storage?.deleteAllByReportID(rid);
-      res.write(`POLIS-PING: cache pruined`);
+    // Process inputs and parameters first
+    let rid = req.p.rid;
+    let conversationId = req.p.conversation_id;
+    let zid: number | undefined;
+
+    // If we don't have rid but have conversation_id, look up or create a report
+    if (!rid && conversationId) {
+      try {
+        const pgQueryP = require('../db/pg-query').queryP;
+        
+        // First get the zid from the zinvite
+        const zidResult = await pgQueryP(
+          'SELECT zid FROM zinvites WHERE zinvite = $1', 
+          [conversationId]
+        );
+        
+        if (!zidResult || !zidResult.rows || !zidResult.rows.length) {
+          return fail(res, 404, "polis_err_zinvite_not_found");
+        }
+        
+        zid = zidResult.rows[0].zid;
+        
+        // Check for existing reports
+        const existingReportResult = await pgQueryP(
+          'SELECT report_id FROM reports WHERE zid = $1 ORDER BY created DESC LIMIT 1', 
+          [zid]
+        );
+        
+        if (existingReportResult?.rows?.length > 0) {
+          // Use the existing report
+          rid = existingReportResult.rows[0].report_id;
+          logger.info(`Using existing report ${rid} for conversation ${conversationId}`);
+        } else {
+          // Create a new report
+          const generateTokenP = require('../auth/password').generateTokenP;
+          const reportId = await generateTokenP(20, false);
+          const formattedReportId = "r" + reportId;
+          
+          await pgQueryP("INSERT INTO reports (zid, report_id) VALUES ($1, $2);", [
+            zid,
+            formattedReportId
+          ]);
+          
+          rid = formattedReportId;
+          logger.info(`Created new report ${rid} for conversation ${conversationId}`);
+        }
+      } catch (err) {
+        logger.error("Error creating/finding report:", err);
+        return fail(res, 500, "polis_error_report_create_failed", err);
+      }
     }
-    const promises = [
-      handle_GET_groupInformedConsensus(
-        rid,
-        storage,
-        res,
-        modelParam as string,
-        system_lore,
-        zid,
-        modelVersionParam as string
-      ),
-      handle_GET_uncertainty(
-        rid,
-        storage,
-        res,
-        modelParam as string,
-        system_lore,
-        zid,
-        modelVersionParam as string
-      ),
-      handle_GET_groups(
-        rid,
-        storage,
-        res,
-        modelParam as string,
-        system_lore,
-        zid,
-        modelVersionParam as string
-      ),
-      handle_GET_topics(
-        rid,
-        storage,
-        res,
-        modelParam as string,
-        system_lore,
-        zid,
-        modelVersionParam as string
-      ),
-    ];
-    await Promise.all(promises);
-  } catch (err) {
+    
+    // Check if we still don't have a report ID
+    if (!rid) {
+      return fail(res, 400, "polis_error_missing_rid_or_conversation_id");
+    }
+    
+    // At this point we definitely have a valid report ID
+    
+    // Initialize DynamoDB storage
+    const storage = new DynamoStorageService(
+      "report_narrative_store",
+      req.query.noCache === "true"
+    );
+    await storage.initTable();
+    
+    const modelParam = req.query.model || "openai";
+    const modelVersionParam = req.query.modelVersion;
+
+    // Now we can start sending the response
+    res.writeHead(200, {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Transfer-Encoding": "chunked",
+    });
+    
+    // Send the report ID first for easy client-side extraction
+    res.write(`POLIS-REPORT-ID: ${rid}\n`);
+    res.write(`POLIS-PING: AI bootstrap\n`);
+    
     // @ts-expect-error flush - calling due to use of compression
     res.flush();
-    logger.error(err);
-    const msg =
-      err instanceof Error && err.message && err.message.startsWith("polis_")
-        ? err.message
-        : "polis_err_report_narrative";
-    fail(res, 500, msg, err);
+
+    // If we don't have zid yet (because we got rid directly), get it now
+    if (!zid) {
+      zid = await getZidForRid(rid);
+      if (!zid) {
+        return fail(res, 404, "polis_error_report_narrative_notfound");
+      }
+    }
+
+    res.write(`POLIS-PING: retrieving system lore\n`);
+
+    // @ts-expect-error flush - calling due to use of compression
+    res.flush();
+
+    const system_lore = await fs.readFile(
+      "src/report_experimental/system.xml",
+      "utf8"
+    );
+
+    res.write(`POLIS-PING: retrieving stream\n`);
+
+    // @ts-expect-error flush - calling due to use of compression
+    res.flush();
+    
+    try {
+      const cachedResponse = await storage?.getAllByReportID(rid);
+      if (
+        Array.isArray(cachedResponse) &&
+        cachedResponse?.length &&
+        !isFreshData(cachedResponse[0].timestamp)
+      ) {
+        res.write(`POLIS-PING: pruning cache\n`);
+        await storage?.deleteAllByReportID(rid);
+        res.write(`POLIS-PING: cache pruned\n`);
+      }
+      
+      const promises = [
+        handle_GET_groupInformedConsensus(
+          rid,
+          storage,
+          res,
+          modelParam as string,
+          system_lore,
+          zid,
+          modelVersionParam as string
+        ),
+        handle_GET_uncertainty(
+          rid,
+          storage,
+          res,
+          modelParam as string,
+          system_lore,
+          zid,
+          modelVersionParam as string
+        ),
+        handle_GET_groups(
+          rid,
+          storage,
+          res,
+          modelParam as string,
+          system_lore,
+          zid,
+          modelVersionParam as string
+        ),
+        handle_GET_topics(
+          rid,
+          storage,
+          res,
+          modelParam as string,
+          system_lore,
+          zid,
+          modelVersionParam as string
+        ),
+      ];
+      
+      await Promise.all(promises);
+    } catch (err) {
+      // @ts-expect-error flush - calling due to use of compression
+      res.flush();
+      logger.error(err);
+      const msg =
+        err instanceof Error && err.message && err.message.startsWith("polis_")
+          ? err.message
+          : "polis_err_report_narrative";
+      fail(res, 500, msg, err);
+    }
+  } catch (err) {
+    logger.error("Top-level error in handle_GET_reportNarrative:", err);
+    return fail(res, 500, "polis_err_report_narrative_general", err);
   }
 }

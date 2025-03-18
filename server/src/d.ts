@@ -150,6 +150,7 @@ export type ConversationType = {
   context?: any;
   xid?: any;
   include_all_conversations_i_am_in?: any;
+  include_all_public_conversations?: any;
   want_mod_url?: any;
   want_upvoted?: any;
   want_inbox_item_admin_url?: any;
